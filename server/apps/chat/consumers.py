@@ -1,102 +1,138 @@
 import json
+import base64
+from django.core.files.base import ContentFile
 from channels.db import database_sync_to_async
 from channels.generic.websocket import AsyncWebsocketConsumer
 from apps.chat.models import ChatRoom, ChatMessage
 from apps.user.models import User, OnlineUser
 
 class ChatConsumer(AsyncWebsocketConsumer):
-	def getUser(self, userId):
-		return User.objects.get(id=userId)
+    async def get_user(self, user_id):
+        try:
+            return await database_sync_to_async(User.objects.get)(id=user_id)
+        except User.DoesNotExist:
+            return None
 
-	def getOnlineUsers(self):
-		onlineUsers = OnlineUser.objects.all()
-		return [onlineUser.user.id for onlineUser in onlineUsers]
+    async def get_online_users(self):
+        online_users = await database_sync_to_async(lambda: list(OnlineUser.objects.select_related('user').all()))()
+        return [online_user.user.id for online_user in online_users]
 
-	def addOnlineUser(self, user):
-		try:
-			OnlineUser.objects.create(user=user)
-		except:
-			pass
+    async def add_online_user(self, user):
+        if user:
+            await database_sync_to_async(OnlineUser.objects.get_or_create)(user=user)
 
-	def deleteOnlineUser(self, user):
-		try:
-			OnlineUser.objects.get(user=user).delete()
-		except:
-			pass
+    async def delete_online_user(self, user):
+        if user:
+            await database_sync_to_async(OnlineUser.objects.filter(user=user).delete)()
 
-	def saveMessage(self, message, userId, roomId):
-		userObj = User.objects.get(id=userId)
-		chatObj = ChatRoom.objects.get(roomId=roomId)
-		chatMessageObj = ChatMessage.objects.create(
-			chat=chatObj, user=userObj, message=message
-		)
-		return {
-			'action': 'message',
-			'user': userId,
-			'roomId': roomId,
-			'message': message,
-			'userImage': userObj.image.url,
-			'userName': userObj.first_name + " " + userObj.last_name,
-			'timestamp': str(chatMessageObj.timestamp)
-		}
+    async def save_message(self, message, user_id, room_id, message_type='text', media_file=None):
+        user_obj = await self.get_user(user_id)
+        if not user_obj:
+            return {"error": "User does not exist"}
 
-	async def sendOnlineUserList(self):
-		onlineUserList = await database_sync_to_async(self.getOnlineUsers)()
-		chatMessage = {
-			'type': 'chat_message',
-			'message': {
-				'action': 'onlineUser',
-				'userList': onlineUserList
-			}
-		}
-		await self.channel_layer.group_send('onlineUser', chatMessage)
+        try:
+            chat_obj = await database_sync_to_async(ChatRoom.objects.get)(roomId=room_id)
+        except ChatRoom.DoesNotExist:
+            return {"error": "ChatRoom does not exist"}
 
-	async def connect(self):
-		self.userId = self.scope['url_route']['kwargs']['userId']
-		self.userRooms = await database_sync_to_async(
-			list
-		)(ChatRoom.objects.filter(member=self.userId))
-		for room in self.userRooms:
-			await self.channel_layer.group_add(
-				room.roomId,
-				self.channel_name
-			)
-		await self.channel_layer.group_add('onlineUser', self.channel_name)
-		self.user = await database_sync_to_async(self.getUser)(self.userId)
-		await database_sync_to_async(self.addOnlineUser)(self.user)
-		await self.sendOnlineUserList()
-		await self.accept()
+        data = None
+        file_name = None
+        if media_file:
+            try:
+                # Process base64 media file and decode
+                format, imgstr = media_file.split(';base64,') 
+                ext = format.split('/')[-1]
+                file_name = f"file.{ext}"  # Generate the file name
+                data = ContentFile(base64.b64decode(imgstr), name=file_name)
+            except Exception as e:
+                return {"error": f"Error processing media file: {str(e)}"}
 
-	async def disconnect(self, close_code):
-		await database_sync_to_async(self.deleteOnlineUser)(self.user)
-		await self.sendOnlineUserList()
-		for room in self.userRooms:
-			await self.channel_layer.group_discard(
-				room.roomId,
-				self.channel_name
-			)
+        chat_message_obj = await database_sync_to_async(ChatMessage.objects.create)(
+            chat=chat_obj,
+            user=user_obj,
+            message=message if message_type == 'text' else None,
+            message_type=message_type,
+            media_file=data
+        )
 
-	async def receive(self, text_data):
-		text_data_json = json.loads(text_data)
-		action = text_data_json['action']
-		roomId = text_data_json['roomId']
-		chatMessage = {}
-		if action == 'message':
-			message = text_data_json['message']
-			userId = text_data_json['user']
-			chatMessage = await database_sync_to_async(
-				self.saveMessage
-			)(message, userId, roomId)
-		elif action == 'typing':
-			chatMessage = text_data_json
-		await self.channel_layer.group_send(
-			roomId,
-			{
-				'type': 'chat_message',
-				'message': chatMessage
-			}
-		)
+        return {
+            'action': 'message',
+            'user': user_id,
+            'roomId': room_id,
+            'message': message,
+            'message_type': message_type,
+            'media_file': chat_message_obj.media_file.url if chat_message_obj.media_file else None,
+            'media_file_name': file_name,
+            'userImage': user_obj.image.url if user_obj.image else None,
+            'userName': f"{user_obj.first_name} {user_obj.last_name}",
+            'timestamp': str(chat_message_obj.timestamp)
+        }
 
-	async def chat_message(self, event):
-		message = event['message']
-		await self.send(text_data=json.dumps(message))
+    async def send_online_user_list(self):
+        online_user_list = await self.get_online_users()
+        chat_message = {
+            'type': 'chat_message',
+            'message': {
+                'action': 'onlineUser',
+                'userList': online_user_list
+            }
+        }
+        await self.channel_layer.group_send('onlineUser', chat_message)
+
+    async def connect(self):
+        self.user_id = self.scope['url_route']['kwargs']['userId']
+        self.user_rooms = await database_sync_to_async(lambda: list(ChatRoom.objects.filter(member=self.user_id)))()
+
+        for room in self.user_rooms:
+            await self.channel_layer.group_add(
+                room.roomId,
+                self.channel_name
+            )
+
+        await self.channel_layer.group_add('onlineUser', self.channel_name)
+
+        self.user = await self.get_user(self.user_id)
+        if self.user:
+            await self.add_online_user(self.user)
+
+        await self.send_online_user_list()
+        await self.accept()
+
+    async def disconnect(self, close_code):
+        if hasattr(self, 'user'):
+            await self.delete_online_user(self.user)
+
+        await self.send_online_user_list()
+
+        for room in self.user_rooms:
+            await self.channel_layer.group_discard(
+                room.roomId,
+                self.channel_name
+            )
+
+    async def receive(self, text_data):
+        text_data_json = json.loads(text_data)
+        action = text_data_json.get('action')
+        room_id = text_data_json.get('roomId')
+        chat_message = {}
+
+        if action == 'message':
+            message = text_data_json.get('message', '')
+            user_id = text_data_json.get('user')
+            message_type = text_data_json.get('message_type', 'text')
+            media_file = text_data_json.get('media_file', None)
+            chat_message = await self.save_message(message, user_id, room_id, message_type, media_file)
+        elif action == 'typing':
+            chat_message = text_data_json
+
+        await self.channel_layer.group_send(
+            room_id,
+            {
+                'type': 'chat_message',
+                'message': chat_message
+            }
+        )
+
+    async def chat_message(self, event):
+        message = event['message']
+        await self.send(text_data=json.dumps(message))
