@@ -7,6 +7,7 @@ import SocketActions from "../../lib/socketActions";
 import CommonUtil from "../../util/commonUtil";
 import "./chatBodyStyle.css";
 import { FaPaperclip } from 'react-icons/fa';
+import { useHistory } from 'react-router-dom'; // Import useHistory
 
 const ChatBody = ({ match, currentChattingMember, setOnlineUserList }) => {
   const [inputMessage, setInputMessage] = useState("");
@@ -18,14 +19,13 @@ const ChatBody = ({ match, currentChattingMember, setOnlineUserList }) => {
   const socketRef = useRef(null);
   const typingTimerRef = useRef(null);
   const isTypingSignalSentRef = useRef(false);
+  const history = useHistory(); // Use useHistory for navigation
 
   const getDateLabel = (timestamp) => {
     const messageDate = new Date(timestamp);
     const today = new Date();
     const yesterday = new Date();
     yesterday.setDate(today.getDate() - 1);
-
-    console.log('Message Date:', messageDate); // Debug log
 
     if (messageDate.toDateString() === today.toDateString()) {
       return "Today";
@@ -50,8 +50,6 @@ const ChatBody = ({ match, currentChattingMember, setOnlineUserList }) => {
           ...message,
           dateLabel: getDateLabel(message.timestamp),
         }));
-
-        console.log('Fetched Messages:', messagesWithLabels); // Debug log
 
         setMessages({ results: messagesWithLabels });
       } catch (error) {
@@ -176,6 +174,11 @@ const ChatBody = ({ match, currentChattingMember, setOnlineUserList }) => {
     setPreviewImage(null);
   };
 
+  const handleProfileClick = () => {
+    const userId = currentChattingMember?.id; // or however you get the user ID
+    history.push(`/profile/${userId}`); // Navigate to profile page
+  };
+
   return (
     <div className="col-12 col-sm-8 col-md-8 col-lg-8 col-xl-10 pl-0 pr-0">
       <div className="py-2 px-4 border-bottom d-none d-lg-block">
@@ -187,10 +190,17 @@ const ChatBody = ({ match, currentChattingMember, setOnlineUserList }) => {
               alt="User"
               width="40"
               height="40"
+              style={{ cursor: 'pointer' }}
+              onClick={handleProfileClick} // Add click handler
             />
           </div>
           <div className="flex-grow-1 pl-3">
-            <strong>{currentChattingMember?.name || 'Unknown User'}</strong>
+            <strong
+              style={{ cursor: 'pointer' }}
+              onClick={handleProfileClick} // Add click handler
+            >
+              {currentChattingMember?.name || 'Unknown User'}
+            </strong>
           </div>
         </div>
       </div>
